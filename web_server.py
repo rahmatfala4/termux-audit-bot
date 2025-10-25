@@ -3,7 +3,7 @@ import os
 import json
 import subprocess
 import logging
-import requests # Mengganti google-genai dengan requests
+import requests 
 from flask import Flask, request, jsonify, render_template_string
 
 # --- Konfigurasi Awal ---
@@ -14,7 +14,7 @@ app.config['DEBUG'] = True
 logging.basicConfig(level=logging.INFO)
 
 # Dapatkan kunci API dari environment
-# Catatan: Di Termux, ini perlu diatur di environment, misal: export GEMINI_API_KEY='YOUR_KEY'
+# PENTING: Kunci harus diset di Termux: export GEMINI_API_KEY='YOUR_KEY'
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # Konstanta API
@@ -30,6 +30,8 @@ AUDIT_FILE = "audit_report.md"
 def run_termux_command(command):
     """Menjalankan perintah shell Termux dan mengembalikan outputnya."""
     try:
+        # Menetapkan PWD secara eksplisit agar Termux shell mengarah ke folder yang benar.
+        # Ini membantu memastikan perintah git berjalan di direktori yang diharapkan.
         result = subprocess.run(
             command,
             shell=True,
@@ -37,7 +39,8 @@ def run_termux_command(command):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            executable='/bin/bash'
+            executable='/bin/bash',
+            cwd=os.getcwd() 
         )
         return {
             "success": True,
@@ -58,7 +61,7 @@ def run_termux_command(command):
         }
 
 def run_git_audit(commit_message):
-    """Menjalankan alur Git Audit: add, commit -S, push."""
+    """Menjalankan alur Git Audit: add, commit, push (Hapus -S untuk menghindari error GPG)."""
     try:
         # 1. Pastikan file audit ada (untuk simulasi)
         if not os.path.exists(AUDIT_FILE):
@@ -70,18 +73,19 @@ def run_git_audit(commit_message):
         if not add_result['success']:
             return f"Error Git Add: {add_result['error']}"
 
-        # 3. Commit dengan GPG Signing (-S)
-        commit_command = f'git commit -S -m "{commit_message.replace("\"", "")}"'
+        # 3. Commit TANPA GPG Signing (-S)
+        commit_command = f'git commit -m "{commit_message.replace("\"", "")}"'
         commit_result = run_termux_command(commit_command)
         if not commit_result['success'] and "nothing to commit" not in commit_result['error']:
-            return f"Error Git Commit -S: {commit_result['error']}"
+            # Pengecualian: 'nothing to commit' bukan error fatal
+            return f"Error Git Commit: {commit_result['error']}"
 
         # 4. Push ke remote
         push_result = run_termux_command("git push")
         if not push_result['success']:
             return f"Error Git Push: {push_result['error']}"
         
-        return "Sinkronisasi Git selesai: `git add .`, `git commit -S`, `git push` berhasil.\nCommit Message: " + commit_message
+        return "Sinkronisasi Git selesai: `git add .`, `git commit`, `git push` berhasil.\nCommit Message: " + commit_message
     
     except Exception as e:
         return f"Error Fatal Git Audit: {e}"
@@ -91,14 +95,15 @@ def run_git_audit(commit_message):
 def generate_gemini_content(prompt):
     """Memanggil model Gemini menggunakan pustaka requests."""
     if not GEMINI_API_KEY:
-        return "Error: GEMINI_API_KEY tidak diatur di environment Termux Anda."
+        # Peringatan ketersediaan API Key
+        return "Error: GEMINI_API_KEY tidak diatur atau tidak valid di environment Termux Anda. Harap atur kunci API yang benar."
 
     # Batasi history untuk menjaga ukuran payload
     current_history = chat_history[-10:] + [{"role": "user", "parts": [{"text": prompt}]}]
     
     payload = {
         "contents": current_history,
-        "tools": [{"google_search": {}}], # Gunakan Google Search Grounding
+        "tools": [{"google_search": {}}], 
         "systemInstruction": {
             "parts": [{
                 "text": "Anda adalah Asisten Gemini yang bekerja di server pengembangan Termux. Tugas Anda adalah membantu pengguna dengan riset bisnis, debugging kode, eksekusi perintah Termux, dan mengelola sinkronisasi Git/Audit. Jawab dengan singkat, jelas, dan profesional. Jika ada konteks Git atau Audit, jangan mengulang tawaran riset umum."
@@ -110,21 +115,16 @@ def generate_gemini_content(prompt):
     params = {'key': GEMINI_API_KEY}
 
     try:
-        # Panggil API menggunakan requests
         response = requests.post(GEMINI_API_URL, headers=headers, params=params, json=payload)
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status() 
         
         result = response.json()
         candidate = result.get('candidates', [{}])[0]
-        
-        # Ekstrak teks
         text_response = candidate.get('content', {}).get('parts', [{}])[0].get('text', "Tidak ada respons teks dari model.")
 
-        # Perbarui chat history global (hanya jika berhasil)
         chat_history.append({"role": "user", "parts": [{"text": prompt}]})
         chat_history.append({"role": "model", "parts": [{"text": text_response}]})
 
-        # Ekstrak grounding sources
         sources = []
         grounding_metadata = candidate.get('groundingMetadata')
         if grounding_metadata and grounding_metadata.get('groundingAttributions'):
@@ -139,27 +139,23 @@ def generate_gemini_content(prompt):
         return text_response
 
     except requests.exceptions.HTTPError as e:
-        return f"Error HTTP API Gemini: {e.response.status_code}. Detail: {e.response.text}"
+        return f"Error HTTP API Gemini: {e.response.status_code}. Detail: Cek apakah kunci API Anda benar. Error: {e.response.text}"
     except Exception as e:
         return f"Error saat memanggil Gemini (Requests): {e}"
 
 def run_automated_audit():
     """Menjalankan simulasi Audit: riset, simpan ke file, Git commit & push."""
     
-    # 1. Riset Harga Bitcoin
-    research_prompt = "Apa harga Bitcoin saat ini dan ringkas status pasar dalam satu kalimat."
+    research_prompt = "Apa harga Bitcoin saat ini dan ringkas status pasar dalam satu kalimat. Beri respon yang sangat singkat, tidak lebih dari dua kalimat."
     gemini_response = generate_gemini_content(research_prompt)
     
-    # Hapus penanda sumber dan ambil teks intinya
     audit_content = gemini_response.split("**Sumber Riset**")[0].strip()
 
-    # 2. Simpan hasil riset ke file audit
     try:
         with open(AUDIT_FILE, "a") as f:
             f.write(f"\n\n## Audit Data - {os.popen('date').read().strip()}\n")
             f.write(audit_content)
             
-        # 3. Commit dan Push
         commit_message = f"Audit Otomatis: Update harga Bitcoin terbaru. {os.popen('date -I').read().strip()}"
         git_status = run_git_audit(commit_message)
         
@@ -177,10 +173,10 @@ def process_input():
     data = request.json
     user_input = data.get('input', '').strip()
     
+    # ... (Logika Termux/Git/Audit/Gemini tetap sama) ...
     response_text = ""
 
     if user_input.startswith('!'):
-        # Mode Termux Shell
         command = user_input[1:].strip()
         termux_result = run_termux_command(command)
         if termux_result['success']:
@@ -191,7 +187,6 @@ def process_input():
             response_text = f"**Termux Error:**\n```\n{termux_result['error']}\n```"
             
     elif user_input.lower().startswith('/git'):
-        # Mode Git Commit
         commit_message = user_input[5:].strip()
         if not commit_message:
             commit_message = f"Pembaruan berkala dari {APP_ID}"
@@ -200,13 +195,12 @@ def process_input():
         response_text += "\n\n" + run_git_audit(commit_message)
 
     elif user_input.lower() == '/audit':
-        # Mode Audit Otomatis
-        response_text = "**Proses Audit Otomatis:** Memulai riset, simpan file, commit -S, dan push..."
+        response_text = "**Proses Audit Otomatis:** Memulai riset, simpan file, commit, dan push..."
         response_text += "\n\n" + run_automated_audit()
         
     else:
-        # Mode Chat/Riset Gemini
         response_text = generate_gemini_content(user_input)
+
 
     return jsonify({"response": response_text})
 
@@ -217,9 +211,9 @@ def index():
     user_id = "UserTermux"
     current_path = os.getcwd()
     
-    # Menggunakan json.dumps untuk chat_history agar aman dimasukkan ke JavaScript
     history_json = json.dumps(chat_history).replace("'", "\\'").replace('\n', '\\n')
 
+    # Versi HTML dengan FAB dan Modal
     html_content = f"""
 <!DOCTYPE html>
 <html lang="id">
@@ -232,13 +226,14 @@ def index():
     <style>
         body {{
             font-family: 'Inter', sans-serif;
-            transition: background-color 0.3s, color 0.3s;
+            background-color: #1f2937; /* Gray 800 */
+            color: #f3f4f6; /* Gray 100 */
         }}
         .chat-container {{
-            max-height: calc(100vh - 10rem); /* Sesuaikan tinggi agar tidak tertutup input fixed */
+            /* Tinggi disesuaikan untuk mobile dan mengakomodasi input fixed */
+            max-height: calc(100vh - 12rem);
             overflow-y: auto;
             scroll-behavior: smooth;
-            padding-bottom: 5rem; /* Tambahkan padding bawah agar pesan tidak tertutup footer */
         }}
         .message-bubble {{
             max-width: 85%;
@@ -253,10 +248,6 @@ def index():
             background-color: #4b5563; /* Abu-abu Gelap */
             color: white;
             border-bottom-left-radius: 0;
-        }}
-        body {{
-            background-color: #1f2937; /* Gray 800 */
-            color: #f3f4f6; /* Gray 100 */
         }}
         .card-panel {{
             background-color: #374151; /* Gray 700 */
@@ -277,21 +268,55 @@ def index():
         .input-field::placeholder {{
             color: #9ca3af; /* Gray 400 */
         }}
-        /* Media Query for Mobile (Single Column) */
+        /* Floating Action Button (FAB) */
+        #fab {{
+            position: fixed;
+            bottom: 6.5rem; /* Di atas input area */
+            right: 1rem;
+            z-index: 30;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background-color: #10b981; /* Hijau Mint */
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+            transition: transform 0.2s;
+        }}
+        #fab:active {{
+            transform: scale(0.95);
+        }}
+
+        /* Utility Modal/Floating Window */
+        #utility-modal {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.7); /* Overlay gelap */
+            z-index: 40;
+            display: none; /* Default tersembunyi */
+            justify-content: center;
+            align-items: center;
+        }}
+        .modal-content {{
+            background-color: #1f2937; /* Gray 800 */
+            width: 90%;
+            max-width: 600px;
+            max-height: 80%;
+            overflow-y: auto;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+        }}
         @media (max-width: 768px) {{
-            .main-content {{
-                grid-template-columns: 1fr;
-            }}
-            .panel-gemini {{
-                display: none; /* Sembunyikan panel Gemini di mobile */
-            }}
-            .chat-container {{
-                max-height: calc(100vh - 12rem); /* Penyesuaian akhir untuk mobile */
+            .modal-content {{
+                margin-top: 5vh; /* Sedikit geser ke atas di mobile */
+                width: 95%;
+                max-height: 90%;
             }}
         }}
     </style>
 </head>
-<body class="bg-gray-800 text-gray-100 min-h-screen flex flex-col">
+<body class="min-h-screen flex flex-col">
 
     <!-- Header -->
     <header class="bg-gray-900 shadow p-4 sticky top-0 z-10">
@@ -300,48 +325,66 @@ def index():
         <p class="text-xs text-gray-500">Dir: {current_path}</p>
     </header>
 
-    <!-- Main Content Area -->
-    <main class="flex-grow p-4 grid grid-cols-1 md:grid-cols-3 gap-4 main-content">
-
-        <!-- Kiri: Chat Interface (2/3 lebar di desktop) -->
-        <div class="md:col-span-2 flex flex-col h-full">
-            
-            <!-- Chat Container -->
-            <div id="chat-container" class="flex-grow chat-container p-2 space-y-4 rounded-lg card-panel shadow-inner">
-                <div class="flex justify-start">
-                    <div class="message-bubble gemini-bubble p-3 rounded-xl">
-                        <p class="font-semibold text-blue-300">Gemini:</p>
-                        <p class="mt-1">Selamat datang! Saya Asisten Gemini. Ketik pesan, atau gunakan <code class="bg-gray-700 p-0.5 rounded">'!'</code> untuk perintah Termux.</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Kanan: Utility/Gemini Assistant (1/3 lebar di desktop, disembunyikan di mobile) -->
-        <div class="panel-gemini md:col-span-1 flex flex-col space-y-4">
-            
-            <!-- Info Panel -->
-            <div class="card-panel p-4 rounded-lg shadow-lg">
-                <h2 class="text-lg font-semibold text-blue-400 mb-2">Utilitas & Status</h2>
-                <p class="text-sm">Gunakan kolom chat untuk perintah:</p>
-                <ul class="text-xs list-disc list-inside mt-2 space-y-1 text-gray-300">
-                    <li><code class="font-mono">!</code>: Perintah Termux (contoh: <code class="font-mono">!ls -l</code>)</li>
-                    <li><code class="font-mono">/git</code>: Commit Git otomatis (contoh: <code class="font-mono">/git Laporan hari ini</code>)</li>
-                    <li><code class="font-mono">/audit</code>: Audit otomatis (riset BTC, simpan file, commit).</li>
-                    <li>Pertanyaan lain: Riset bisnis dengan Gemini.</li>
-                </ul>
-            </div>
-            
-            <!-- Simulasi Log/Status -->
-            <div id="log-status" class="card-panel p-4 rounded-lg shadow-lg flex-grow">
-                <h2 class="text-lg font-semibold text-blue-400 mb-2">Log Aksi</h2>
-                <div id="status-messages" class="text-sm space-y-1 text-gray-300">
-                    <p>Log akan muncul di sini.</p>
+    <!-- Main Content Area: HANYA Chat -->
+    <main class="flex-grow p-4">
+        
+        <!-- Chat Container -->
+        <div id="chat-container" class="chat-container p-2 space-y-4 rounded-lg card-panel shadow-inner">
+            <div class="flex justify-start">
+                <div class="message-bubble gemini-bubble p-3 rounded-xl">
+                    <p class="font-semibold text-blue-300">Gemini:</p>
+                    <p class="mt-1">Selamat datang! Saya Asisten Gemini. Ketik pesan, atau sentuh tombol hijau di kanan bawah untuk utilitas.</p>
                 </div>
             </div>
         </div>
 
     </main>
+    
+    <!-- Floating Action Button (FAB) -->
+    <button id="fab" onclick="toggleModal()">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-8 h-8 text-white mx-auto">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21l-7.9-10.375-4.228 5.625M12.66 12.375l2.25 2.25l2.25-2.25l-2.25-2.25Z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12.66 12.375l2.25 2.25l2.25-2.25l-2.25-2.25Z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 11.25H9m4.5-3.375L12 6.75l-1.5-1.125m4.5 5.625L12 10.5l-1.5 1.125m4.5 5.625l-1.5 1.125-1.5-1.125" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.8 19.125l3.375-3.375M12 12l2.25-2.25M9.75 14.25L7.5 12" />
+        </svg>
+
+    </button>
+
+    <!-- Utility Modal (Jendela Mengambang) -->
+    <div id="utility-modal" onclick="if(event.target.id === 'utility-modal') toggleModal()">
+        <div class="modal-content p-6 flex flex-col space-y-4">
+            
+            <div class="flex justify-between items-center pb-2 border-b border-gray-600">
+                <h2 class="text-xl font-bold text-blue-400">Asisten Utilitas</h2>
+                <button onclick="toggleModal()" class="text-gray-400 hover:text-white transition">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Info Panel -->
+            <div class="card-panel p-4 rounded-lg shadow-inner">
+                <h3 class="text-lg font-semibold text-blue-400 mb-2">Perintah Cepat</h3>
+                <p class="text-sm">Anda bisa mengetik atau menyalin perintah ini ke kolom chat:</p>
+                <ul class="text-xs list-disc list-inside mt-2 space-y-1 text-gray-300">
+                    <li><code class="font-mono bg-gray-600 p-0.5 rounded">!ls -l</code>: Untuk mengecek isi direktori.</li>
+                    <li><code class="font-mono bg-gray-600 p-0.5 rounded">/git Laporan hari ini</code>: Commit Git otomatis.</li>
+                    <li><code class="font-mono bg-gray-600 p-0.5 rounded">/audit</code>: Audit otomatis (riset BTC, simpan file, commit).</li>
+                </ul>
+            </div>
+            
+            <!-- Simulasi Log/Status -->
+            <div id="log-status" class="card-panel p-4 rounded-lg shadow-lg flex-grow">
+                <h3 class="text-lg font-semibold text-blue-400 mb-2">Log Aksi Server</h3>
+                <div id="status-messages" class="text-sm space-y-1 text-gray-300 max-h-48 overflow-y-auto">
+                    <p>Log akan muncul di sini.</p>
+                </div>
+            </div>
+
+        </div>
+    </div>
     
     <!-- Input Area (Fixed di bagian bawah) -->
     <div class="input-area p-4 rounded-t-xl shadow-2xl flex items-center">
@@ -366,9 +409,13 @@ def index():
         const userInput = document.getElementById('user-input');
         const sendButton = document.getElementById('send-button');
         const statusMessages = document.getElementById('status-messages');
+        const utilityModal = document.getElementById('utility-modal');
         let chatHistoryData = JSON.parse('{history_json}');
         
-        // Fungsi untuk menambahkan pesan ke UI
+        function toggleModal() {{
+            utilityModal.style.display = utilityModal.style.display === 'flex' ? 'none' : 'flex';
+        }}
+        
         function addMessage(role, text) {{
             const messageDiv = document.createElement('div');
             messageDiv.className = 'flex ' + (role === 'user' ? 'justify-end' : 'justify-start');
@@ -384,10 +431,11 @@ def index():
                 bubble.appendChild(header);
                 
                 const content = document.createElement('div');
-                // Mengganti Markdown bold dan inline code
                 const formattedText = text
                     .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
-                    .replace(/`([^`]+)`/g, '<code class="bg-gray-700 p-0.5 rounded text-yellow-300">$1</code>')
+                    .replace(/```bash\\n(.*?)\\n```/gs, '<pre class="bg-gray-900 p-2 rounded mt-1 overflow-x-auto text-green-300"><code>$1</code></pre>')
+                    .replace(/```\\n(.*?)\\n```/gs, '<pre class="bg-gray-900 p-2 rounded mt-1 overflow-x-auto text-green-300"><code>$1</code></pre>')
+                    .replace(/`([^`]+)`/g, '<code class="bg-gray-600 p-0.5 rounded text-yellow-300">$1</code>')
                     .replace(/\\n/g, '<br>');
                 content.innerHTML = '<p class="mt-1">' + formattedText + '</p>';
                 bubble.appendChild(content);
@@ -396,22 +444,21 @@ def index():
                 bubble.textContent = text;
             }}
             
-            messageDiv.appendChild(bubble);
-            chatContainer.appendChild(messageDiv);
-            
-            // Scroll ke bawah
+            chatContainer.appendChild(messageDiv).appendChild(bubble);
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }}
         
-        // Fungsi untuk menampilkan pesan status/log
         function addStatus(message) {{
             const p = document.createElement('p');
             p.className = 'text-xs text-gray-400 border-t border-gray-600 pt-1';
             p.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;
             statusMessages.prepend(p);
+            // Batasi jumlah log
+            while (statusMessages.children.length > 20) {{
+                statusMessages.removeChild(statusMessages.lastChild);
+            }}
         }}
 
-        // Memuat history awal
         chatHistoryData.forEach(item => {{
             if (item.role === 'user') {{
                 addMessage('user', item.parts[0].text);
@@ -420,7 +467,6 @@ def index():
             }}
         }});
 
-        // Fungsi utama pengiriman pesan
         async function sendMessage() {{
             const input = userInput.value.trim();
             if (!input) return;
@@ -449,7 +495,7 @@ def index():
 
             }} catch (error) {{
                 console.error('Fetch error:', error);
-                addMessage('model', 'Error Komunikasi: Gagal mendapatkan respons dari server Termux. Cek konsol server Anda. (' + error.message + ')');
+                addMessage('model', 'Error Komunikasi: Gagal mendapatkan respons dari server Termux. (' + error.message + ')');
                 addStatus('Error Komunikasi: ' + error.message);
             }} finally {{
                 sendButton.disabled = false;
@@ -457,7 +503,6 @@ def index():
             }}
         }}
 
-        // Inisialisasi: Scroll ke bawah
         window.onload = () => {{
             chatContainer.scrollTop = chatContainer.scrollHeight;
             addStatus("Antarmuka dimuat. Siap untuk interaksi.");
