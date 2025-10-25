@@ -17,3 +17,6 @@ Status pasar kripto untuk Bitcoin saat ini menunjukkan **volatilitas yang berkel
 
 ## Audit Data - Sat Oct 25 21:07:41 WIB 2025
 Harga Bitcoin saat ini berada di sekitar **\$111.731 USD** atau **Rp1.855.501.952 IDR**. Pasar saat ini menunjukkan kenaikan tipis sebesar 0,30% dalam 24 jam terakhir dan peningkatan 4,30% dalam 7 hari terakhir, menjadikannya berkinerja terbaik di pasar kripto global.
+
+## Audit Data - Sat Oct 25 21:29:58 WIB 2025
+Harga Bitcoin saat ini adalah sekitar **$111.600 - $111.700 USD** atau sekitar **Rp1,85 Miliar - Rp1,86 Miliar IDR** per BTC. Pasar sedang berada dalam fase konsolidasi dan kehati-hatian karena momentum yang melemah.
