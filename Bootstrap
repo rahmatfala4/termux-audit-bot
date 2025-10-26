@@ -1,0 +1,170 @@
+import subprocess
+import time
+import re
+import xml.etree.ElementTree as ET
+import os
+
+# --- PENTING: CONFIGURATION ---
+# PERINGATAN: Nilai ini harus selalu disinkronkan dengan port terbaru yang Anda gunakan
+ADB_IP_PORT = "192.168.1.16:37753" 
+UI_FILE_PATH = "ui.xml"
+
+# FUNGSI DASAR (Diambil dari defensive_logic.py)
+def run_adb_command(command_parts):
+    """Menjalankan perintah ADB shell dan menangani output/error."""
+    try:
+        result = subprocess.run(
+            command_parts,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            timeout=5
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        error_output = e.stderr.strip() or e.stdout.strip()
+        return f"ADB_ERROR (Code {e.returncode}): {error_output}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+def get_center_coords(bounds_string):
+    """Menghitung koordinat tengah (x, y) dari string bounds: [x1,y1][x2,y2]"""
+    match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_string)
+    if not match: return None
+    x1, y1, x2, y2 = map(int, match.groups())
+    return (x1 + x2) // 2, (y1 + y2) // 2
+
+def find_and_tap_text(target_text, scroll_max=2):
+    """
+    Mencari teks yang cocok dalam UI.xml dan mengetuknya.
+    Akan menggulir ke atas hingga 'scroll_max' kali jika tidak ditemukan.
+    """
+    target_text_lower = target_text.lower()
+    
+    for scroll_count in range(scroll_max + 1):
+        print(f"[{time.strftime('%H:%M:%S')}] Mencari dan mengetuk: '{target_text}' (Guliran ke-{scroll_count})")
+        
+        # 1. Dump dan Pull UI terbaru
+        # KITA HANYA MENDUMP, TIDAK PERLU PULL KARENA KITA SUDAH TAHU ITU TIDAK STABIL
+        dump_result = run_adb_command(['adb', 'shell', 'uiautomator', 'dump', f'/sdcard/{UI_FILE_PATH}'])
+        pull_result = run_adb_command(['adb', 'pull', f'/sdcard/{UI_FILE_PATH}', '.'])
+        
+        if "ADB_ERROR" in dump_result or "ADB_ERROR" in pull_result:
+             print(f"[{time.strftime('%H:%M:%S')}] Peringatan: ADB error saat dump/pull. Menggunakan file lama jika ada.")
+        
+        if not os.path.exists(UI_FILE_PATH):
+            continue # Lanjut ke guliran berikutnya jika file tidak ada
+        
+        try:
+            tree = ET.parse(UI_FILE_PATH)
+            root = tree.getroot()
+            
+            for node in root.iter():
+                text = node.get('text', '')
+                content_desc = node.get('content-desc', '')
+                bounds = node.get('bounds')
+                
+                if bounds and (target_text_lower in text.lower() or target_text_lower in content_desc.lower()):
+                    coords = get_center_coords(bounds)
+                    if coords:
+                        tap_result = run_adb_command(['adb', 'shell', 'input', 'tap', str(coords[0]), str(coords[1])])
+                        print(f"[{time.strftime('%H:%M:%S')}] Tap SUKSES pada '{text or content_desc}' di {coords}")
+                        return True, tap_result
+        except Exception as e:
+            print(f"[{time.strftime('%H:%M:%S')}] ERROR XML saat parsing: {e}")
+            
+        # Jika teks tidak ditemukan dan ada kesempatan gulir, gulir ke atas
+        if scroll_count < scroll_max:
+             # Gulir ke atas (dari bawah ke atas layar)
+            print("Teks tidak ditemukan. Menggulir ke atas...")
+            run_adb_command(['adb', 'shell', 'input', 'swipe', '500', '1500', '500', '500', '300']) 
+            time.sleep(1) # Tunggu UI stabil
+
+    print(f"[{time.strftime('%H:%M:%S')}] GAGAL menemukan teks: '{target_text}' setelah semua guliran.")
+    return False, f"Teks '{target_text}' tidak ditemukan di UI."
+
+# --- FUNGSI UTAMA BOOTSTRAP (MIUI) ---
+def bootstrap_wireless_debugging():
+    """
+    Mengotomatisasi navigasi ke menu Wireless Debugging (MIUI flow).
+    """
+    print("--- MEMULAI BOOTSTRAP DEBUGGING NIRKABEL (MIUI FLOW) ---")
+    
+    # 1. Buka Pengaturan (Settings)
+    # Ini harus dilakukan dari mana saja
+    result = run_adb_command(['adb', 'shell', 'am', 'start', '-a', 'android.settings.SETTINGS'])
+    if "ADB_ERROR" in result:
+        return f"BOOTSTRAP GAGAL: Koneksi ADB mati. Harap hubungkan ulang ke {ADB_IP_PORT}. Detail: {result}"
+    
+    time.sleep(1) 
+
+    # 2. Tap "Setelan tambahan" (Additional Settings)
+    success, _ = find_and_tap_text("Setelan tambahan", scroll_max=2) 
+    if not success:
+        return "BOOTSTRAP GAGAL: Tidak dapat menemukan 'Setelan tambahan'."
+
+    time.sleep(1) 
+
+    # 3. Tap "Opsi pengembang" (Developer Options)
+    # Di MIUI, Opsi Pengembang ada di dalam Setelan Tambahan
+    success, _ = find_and_tap_text("Opsi pengembang", scroll_max=3)
+    if not success:
+        return "BOOTSTRAP GAGAL: Tidak dapat menemukan 'Opsi pengembang'."
+
+    time.sleep(1) 
+
+    # 4. Cari dan Tap "Debugging nirkabel" (Wireless Debugging)
+    # Ini biasanya berada di tengah menu
+    success, _ = find_and_tap_text("Debugging nirkabel", scroll_max=3)
+    if not success:
+        return "BOOTSTRAP GAGAL: Tidak dapat menemukan 'Debugging nirkabel'."
+
+    time.sleep(1) 
+    
+    # 5. Cari dan Tap Tombol Sakelar ("On/Off" atau Toggle)
+    # Di menu "Debugging nirkabel" itu sendiri, ada sakelar yang harus diaktifkan
+    
+    # KITA AKAN MENCARI TEXT SAKELAR 'OFF' atau 'MATI' untuk memastikan kita mengaktifkannya.
+    # Namun, paling aman adalah mengetuk di area yang diharapkan, yaitu sakelar.
+    
+    # Sekarang kita berada di menu Debugging Nirkabel.
+    # Mencoba mencari elemen sakelar (Switch/Toggle) di UI
+    
+    # Ulangi dump/pull terakhir untuk UI menu Debugging Nirkabel
+    run_adb_command(['adb', 'shell', 'uiautomator', 'dump', f'/sdcard/{UI_FILE_PATH}'])
+    run_adb_command(['adb', 'pull', f'/sdcard/{UI_FILE_PATH}', '.'])
+    
+    try:
+        tree = ET.parse(UI_FILE_PATH)
+        root = tree.getroot()
+        
+        # Mencari node yang merupakan Toggle Switch (className: android.widget.Switch atau sejenisnya)
+        # dan berada di bagian atas layar
+        
+        # Logika umum: Mencari sakelar di kanan atas atau node yang 'checkable'
+        for node in root.iter():
+            bounds = node.get('bounds')
+            is_switch = 'switch' in node.get('class', '').lower()
+            is_clickable = node.get('clickable') == 'true'
+            
+            if bounds and (is_switch or (is_clickable and ('mode' in node.get('text', '').lower() or 'on' in node.get('text', '').lower() or 'mati' in node.get('text', '').lower()))):
+                 # Filter berdasarkan lokasi (biasanya di kanan atas)
+                if get_center_coords(bounds)[0] > 700 and get_center_coords(bounds)[1] < 400: # Koordinat di kanan atas
+                    coords = get_center_coords(bounds)
+                    tap_result = run_adb_command(['adb', 'shell', 'input', 'tap', str(coords[0]), str(coords[1])])
+                    return f"BOOTSTRAP SELESAI: Berhasil menekan sakelar/toggle di {coords}. Hasil ADB: {tap_result}"
+
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] ERROR XML saat mencoba tap toggle: {e}")
+        
+    # Jika gagal menemukan sakelar, coba tap koordinat universal di kanan atas (RISIKO TINGGI)
+    universal_toggle_tap = run_adb_command(['adb', 'shell', 'input', 'tap', '900', '150'])
+    return f"BOOTSTRAP SELESAI: Gagal menemukan sakelar, mencoba koordinat default (900, 150). Harap periksa status Debugging Nirkabel."
+
+# --- DEMO ---
+if __name__ == "__main__":
+    print(f"PERHATIAN: Skrip ini membutuhkan koneksi ADB ke {ADB_IP_PORT} untuk menginisiasi tindakan.")
+    report = bootstrap_wireless_debugging()
+    print("\n--- LAPORAN BOOTSTRAP NIRKABEL ---")
+    print(report)
